@@ -27,6 +27,7 @@ export interface TelegramMessage {
   caption?: string;
   voice?: TelegramVoice;
   audio?: TelegramAudio;
+  reply_to_message?: TelegramMessage;
 }
 
 export interface TelegramCallbackQuery {
@@ -48,6 +49,7 @@ export interface NormalizedBotRequest {
   userId: number | null;
   username: string | null;
   messageId: number | null;
+  replyToMessageId: number | null;
   text: string | null;
   voiceFileId: string | null;
   messageType: MessageType;
@@ -59,6 +61,7 @@ export interface NormalizedBotRequest {
 export type AgentActionType =
   | "create_calendar_event"
   | "create_gmail_draft"
+  | "manage_calendar_invite"
   | "create_google_doc"
   | "clarify_request"
   | "unsupported_request";
@@ -89,6 +92,18 @@ export interface GmailDraftPayload {
   subject: string;
   bodyText: string;
   replyContextMessageId?: string | null;
+  threadId?: string | null;
+  inReplyToMessageHeader?: string | null;
+  referencesHeader?: string | null;
+}
+
+export interface CalendarInvitePayload {
+  operation: "accept" | "decline" | "tentative" | "check_conflicts";
+  title: string;
+  startAt: string;
+  endAt: string;
+  timezone: string;
+  organizerEmail: string | null;
 }
 
 export interface GoogleDocPayload {
@@ -99,6 +114,7 @@ export interface GoogleDocPayload {
 export type AgentPayload =
   | CalendarEventPayload
   | GmailDraftPayload
+  | CalendarInvitePayload
   | GoogleDocPayload
   | null;
 
@@ -119,6 +135,14 @@ export interface PendingActionRecord {
   messageId: number | null;
   action: AgentAction;
   sourceText: string;
+}
+
+export interface PendingClarificationRecord {
+  telegramUserId: number;
+  chatId: number;
+  action: AgentAction;
+  sourceText: string;
+  clarificationType: "gmail_recipient";
 }
 
 export interface OAuthStateRecord {

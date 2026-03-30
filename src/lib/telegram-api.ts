@@ -5,6 +5,19 @@ type InlineKeyboardMarkup = {
   inline_keyboard: Array<Array<{ text: string; url?: string; callback_data?: string }>>;
 };
 
+type ReplyKeyboardMarkup = {
+  keyboard: Array<Array<{
+    text: string;
+    web_app?: {
+      url: string;
+    };
+  }>>;
+  resize_keyboard?: boolean;
+  is_persistent?: boolean;
+};
+
+type TelegramReplyMarkup = InlineKeyboardMarkup | ReplyKeyboardMarkup;
+
 const TELEGRAM_BASE_URL = `https://api.telegram.org/bot${getTelegramBotToken()}`;
 
 async function telegramRequest<T>(
@@ -30,7 +43,7 @@ export async function sendTelegramMessage(
   chatId: number,
   text: string,
   options?: {
-    replyMarkup?: InlineKeyboardMarkup;
+    replyMarkup?: TelegramReplyMarkup;
   },
 ): Promise<{ message_id: number }> {
   return telegramRequest("sendMessage", {
@@ -83,4 +96,27 @@ export async function getTelegramUpdates(
   return telegramRequest(
     `getUpdates?offset=${offset}&timeout=${timeoutSeconds}&allowed_updates=${encodeURIComponent(JSON.stringify(["message", "callback_query"]))}`,
   );
+}
+
+export function botMenuReplyMarkup(connectUrl?: string | null): ReplyKeyboardMarkup {
+  const canUseWebApp = Boolean(connectUrl && connectUrl.startsWith("https://"));
+
+  return {
+    keyboard: [
+      [
+        canUseWebApp && connectUrl
+          ? {
+              text: "Connect Google",
+              web_app: {
+                url: connectUrl,
+              },
+            }
+          : { text: "Connect Google" },
+        { text: "Status" },
+      ],
+      [{ text: "Help" }],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+  };
 }

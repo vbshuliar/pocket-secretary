@@ -25,6 +25,7 @@ export function normalizeTelegramUpdate(
     userId: user?.id ?? null,
     username: user?.username ?? null,
     messageId: message?.message_id ?? null,
+    replyToMessageId: message?.reply_to_message?.message_id ?? null,
     text: extractText(update),
     voiceFileId: extractVoiceFileId(update),
     messageType: extractVoiceFileId(update) ? "voice" : "text",

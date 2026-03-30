@@ -4,6 +4,7 @@ import { decryptJson, encryptJson } from "@/src/lib/crypto";
 import { addToSet, deleteKey, getSetMembers, getString, removeFromSet, setString } from "@/src/lib/upstash";
 import type {
   CalendarEventPayload,
+  CalendarInvitePayload,
   ContactMatch,
   GmailDraftPayload,
   GoogleDocPayload,
@@ -163,6 +164,103 @@ export async function createCalendarEvent(
   );
 }
 
+export interface GoogleCalendarEvent {
+  id: string;
+  summary: string;
+  status: string;
+  htmlLink?: string;
+  organizerEmail: string | null;
+  startAt: string | null;
+  endAt: string | null;
+  attendees: Array<{
+    email: string;
+    self?: boolean;
+    responseStatus?: string;
+  }>;
+}
+
+export async function listCalendarEvents(
+  accessToken: string,
+  timeMin: string,
+  timeMax: string,
+): Promise<GoogleCalendarEvent[]> {
+  const params = new URLSearchParams({
+    singleEvents: "true",
+    orderBy: "startTime",
+    timeMin,
+    timeMax,
+    maxResults: "50",
+  });
+  const response = await fetchGoogleJson<{
+    items?: Array<{
+      id?: string;
+      summary?: string;
+      status?: string;
+      htmlLink?: string;
+      organizer?: { email?: string };
+      start?: { dateTime?: string; date?: string };
+      end?: { dateTime?: string; date?: string };
+      attendees?: Array<{ email?: string; self?: boolean; responseStatus?: string }>;
+    }>;
+  }>(
+    accessToken,
+    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(getGoogleDefaultCalendarId())}/events?${params.toString()}`,
+    { method: "GET" },
+  );
+
+  return (response.items ?? [])
+    .filter((item): item is NonNullable<typeof item> & { id: string } => Boolean(item?.id))
+    .map((item) => ({
+      id: item.id,
+      summary: item.summary ?? "(No Subject)",
+      status: item.status ?? "confirmed",
+      htmlLink: item.htmlLink,
+      organizerEmail: item.organizer?.email ?? null,
+      startAt: item.start?.dateTime ?? item.start?.date ?? null,
+      endAt: item.end?.dateTime ?? item.end?.date ?? null,
+      attendees: (item.attendees ?? [])
+        .filter((attendee): attendee is NonNullable<typeof attendee> & { email: string } => Boolean(attendee?.email))
+        .map((attendee) => ({
+          email: attendee.email,
+          self: attendee.self,
+          responseStatus: attendee.responseStatus,
+        })),
+    }));
+}
+
+export async function updateCalendarInviteResponse(
+  accessToken: string,
+  eventId: string,
+  responseStatus: "accepted" | "declined" | "tentative",
+): Promise<void> {
+  const event = await fetchGoogleJson<{
+    attendees?: Array<{ email?: string; self?: boolean; responseStatus?: string }>;
+  }>(
+    accessToken,
+    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(getGoogleDefaultCalendarId())}/events/${encodeURIComponent(eventId)}`,
+    { method: "GET" },
+  );
+
+  const attendees = (event.attendees ?? []).map((attendee) => ({
+    email: attendee.email,
+    self: attendee.self,
+    responseStatus: attendee.self ? responseStatus : attendee.responseStatus,
+  }));
+
+  await fetchGoogleJson(
+    accessToken,
+    `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(getGoogleDefaultCalendarId())}/events/${encodeURIComponent(eventId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({
+        attendees,
+      } satisfies Partial<CalendarInvitePayload> & {
+        attendees: Array<{ email?: string; self?: boolean; responseStatus?: string }>;
+      }),
+    },
+  );
+}
+
 function toBase64Url(value: string): string {
   return Buffer.from(value, "utf8")
     .toString("base64")
@@ -175,6 +273,8 @@ function buildRawEmail(payload: GmailDraftPayload): string {
   return [
     `To: ${payload.to.map((recipient) => recipient.email).join(", ")}`,
     `Subject: ${payload.subject}`,
+    ...(payload.inReplyToMessageHeader ? [`In-Reply-To: ${payload.inReplyToMessageHeader}`] : []),
+    ...(payload.referencesHeader ? [`References: ${payload.referencesHeader}`] : []),
     "Content-Type: text/plain; charset=utf-8",
     "",
     payload.bodyText,
@@ -195,6 +295,7 @@ export async function createGmailDraft(
       body: JSON.stringify({
         message: {
           raw: toBase64Url(raw),
+          ...(payload.threadId ? { threadId: payload.threadId } : {}),
         },
       }),
     },
@@ -211,6 +312,7 @@ export async function sendGmailMessage(
     method: "POST",
     body: JSON.stringify({
       raw: toBase64Url(raw),
+      ...(payload.threadId ? { threadId: payload.threadId } : {}),
     }),
   });
 }
@@ -262,6 +364,8 @@ export interface GmailInboxMessage {
   subject: string;
   from: string;
   snippet: string;
+  messageHeaderId: string | null;
+  referencesHeader: string | null;
 }
 
 export async function listRecentInboxMessages(
@@ -295,13 +399,17 @@ export async function listRecentInboxMessages(
       };
     }>(
       accessToken,
-      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${message.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From`,
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${message.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Message-ID&metadataHeaders=References`,
       { method: "GET" },
     );
 
     const headers = full.payload?.headers ?? [];
     const subject = headers.find((header) => header.name === "Subject")?.value ?? "(no subject)";
     const from = headers.find((header) => header.name === "From")?.value ?? "(unknown sender)";
+    const messageHeaderId =
+      headers.find((header) => header.name?.toLowerCase() === "message-id")?.value ?? null;
+    const referencesHeader =
+      headers.find((header) => header.name?.toLowerCase() === "references")?.value ?? null;
     results.push({
       id: full.id,
       threadId: full.threadId,
@@ -309,6 +417,8 @@ export async function listRecentInboxMessages(
       subject,
       from,
       snippet: full.snippet ?? "",
+      messageHeaderId,
+      referencesHeader,
     });
   }
 

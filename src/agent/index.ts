@@ -3,6 +3,7 @@ import { extractActionFromText } from "@/src/lib/openai";
 import type {
   AgentAction,
   CalendarEventPayload,
+  CalendarInvitePayload,
   ConversationTurn,
   GmailDraftPayload,
   GoogleDocPayload,
@@ -40,6 +41,89 @@ function stripReplyLeadIn(text: string): string {
     .trim();
 }
 
+function isCalendarInviteEmail(email: RecentEmailContext | null): boolean {
+  if (!email) {
+    return false;
+  }
+
+  return (
+    /^Invitation:/i.test(email.subject) ||
+    /\byou have been invited\b/i.test(email.snippet) ||
+    /\bjoin with google meet\b/i.test(email.snippet)
+  );
+}
+
+function normalizeInviteTitle(value: string): string {
+  const title = value.trim() || "(No Subject)";
+  return title === "No Subject" ? "(No Subject)" : title;
+}
+
+function parseInviteDetails(email: RecentEmailContext): CalendarInvitePayload | null {
+  const subjectMatch = email.subject.match(/^Invitation:\s*(.*?)\s*@\s*.+$/i);
+  const title = normalizeInviteTitle(subjectMatch?.[1] ?? "(No Subject)");
+
+  const snippetMatch = email.snippet.match(
+    /on\s+[A-Za-z]+\s+(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})\s*[⋅·]\s*(\d{1,2}:\d{2})\s*[–-]\s*(\d{1,2}:\d{2})\s*\(([^)]+)\)/i,
+  );
+  const subjectTimeMatch = email.subject.match(
+    /@\s*[A-Za-z]{3}\s+(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})\s+(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*\(([^)]+)\)/i,
+  );
+  const match = snippetMatch ?? subjectTimeMatch;
+  if (!match) {
+    return null;
+  }
+
+  const [, day, month, year, startTime, endTime, timezoneLabel] = match;
+  const monthIndex = [
+    "jan",
+    "feb",
+    "mar",
+    "apr",
+    "may",
+    "jun",
+    "jul",
+    "aug",
+    "sep",
+    "oct",
+    "nov",
+    "dec",
+  ].indexOf(month.toLowerCase());
+  if (monthIndex === -1) {
+    return null;
+  }
+
+  const timezone = /\b(united kingdom time|bst|gmt)\b/i.test(timezoneLabel)
+    ? "Europe/London"
+    : getDefaultTimezone();
+  const datePart = `${year}-${String(monthIndex + 1).padStart(2, "0")}-${String(Number(day)).padStart(2, "0")}`;
+
+  return {
+    operation: "check_conflicts",
+    title,
+    startAt: `${datePart}T${startTime}:00`,
+    endAt: `${datePart}T${endTime}:00`,
+    timezone,
+    organizerEmail: email.fromEmail,
+  };
+}
+
+function getInviteOperation(text: string): CalendarInvitePayload["operation"] | null {
+  if (/\b(check|see|tell me).*\b(clash|conflict|double booked|overlap)\b/i.test(text)) {
+    return "check_conflicts";
+  }
+  if (/\baccept\b/i.test(text)) {
+    return "accept";
+  }
+  if (/\bdecline\b/i.test(text)) {
+    return "decline";
+  }
+  if (/\b(tentative|maybe)\b/i.test(text)) {
+    return "tentative";
+  }
+
+  return null;
+}
+
 export async function runPocketSecretary(
   request: NormalizedBotRequest,
   sourceText: string,
@@ -48,7 +132,14 @@ export async function runPocketSecretary(
 ): Promise<AgentAction> {
   const extracted = await extractActionFromText(sourceText, conversation, recentEmail);
   const reminderFallback = looksLikeReminder(sourceText);
-  const hasReplyContext = looksLikeReplyIntent(sourceText) && recentEmail !== null;
+  const hasReplyContext =
+    recentEmail !== null &&
+    (request.replyToMessageId !== null || looksLikeReplyIntent(sourceText));
+  const inviteDetails =
+    hasReplyContext && isCalendarInviteEmail(recentEmail) && recentEmail
+      ? parseInviteDetails(recentEmail)
+      : null;
+  const inviteOperation = inviteDetails ? getInviteOperation(sourceText) : null;
 
   if (reminderFallback && extracted.actionType === "unsupported_request") {
     extracted.actionType = "create_calendar_event";
@@ -73,6 +164,27 @@ export async function runPocketSecretary(
         ? recentEmail.subject
         : `Re: ${recentEmail.subject}`,
       bodyText: replyBody || "",
+    };
+  }
+
+  if (inviteDetails && inviteOperation) {
+    const payload: CalendarInvitePayload = {
+      ...inviteDetails,
+      operation: inviteOperation,
+    };
+
+    return {
+      actionType: "manage_calendar_invite",
+      status: inviteOperation === "check_conflicts" ? "completed" : "needs_confirmation",
+      confidence: Math.max(extracted.confidence, 0.7),
+      requiresClarification: false,
+      clarificationQuestion: null,
+      payload,
+      userVisibleSummary:
+        inviteOperation === "check_conflicts"
+          ? `Check for conflicts with "${payload.title}" at ${payload.startAt}.`
+          : `Prepare to ${inviteOperation} the invite "${payload.title}".`,
+      warnings: [],
     };
   }
 
